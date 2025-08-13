@@ -1,0 +1,5 @@
+.venv/
+build/
+*.csv
+./GITHUB_TOPICS.txt
+./REPO_DESCRIPTION.txt
