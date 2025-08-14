@@ -1,3 +1,5 @@
 .venv/
 build/
 *.csv
+FPS_Mouse_Tester_and_Diagnosis.spec
+__pycache__/
