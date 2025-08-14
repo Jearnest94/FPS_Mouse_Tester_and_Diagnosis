@@ -16,6 +16,8 @@ Provides detailed CSV logging and live visual feedback with configurable thresho
 - Remembers last settings and log directory.
 - Configurable thresholds — adjust near-click window and combat CPS threshold at runtime.
 
+![Screenshot of FPS Mouse Test & Diagnosis showing real-time mouse event logging with red highlights for near-click scrolls, event data columns, and configurable threshold settings.](./GITHUB_README.jpg)
+
 ## Quick Start
 ```powershell
 pip install -r requirements.txt
