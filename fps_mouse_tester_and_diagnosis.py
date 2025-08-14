@@ -20,7 +20,7 @@
 import queue
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 import csv
 import os
 import json
@@ -52,11 +52,11 @@ COMBAT_CPS_DEFAULT = 2.0       # LMB-downs per second to call it "combat"
 COORDS_ENABLED_DEFAULT = False # default off
 
 # --- CSV schema -------------------------------------------------------------
-HEADER = ["timestamp","x","y","dx","dy","ms_since_button_event","combat_state","scroll_near_click","event",]
+HEADER = ["timestamp","ms_since_start","x","y","dx","dy","ms_since_button_event","combat_state","scroll_near_click","event",]
 
 # --- Core: capture and logging backend -------------------------------------
 class LoggerCore:
-    def __init__(self, filepath, event_queue, near_click_ms, combat_cps, coords_enabled):
+    def __init__(self, filepath, event_queue, near_click_ms, combat_cps, coords_enabled, ms_since_start=None):
         self.filepath = filepath
         self.event_queue = event_queue
         self.listener = None
@@ -66,6 +66,7 @@ class LoggerCore:
         self._near_click_ms = int(near_click_ms)
         self._combat_cps = float(combat_cps)
         self._coords_enabled = bool(coords_enabled)
+        self.start_ms = None
 
         self._last_btn_ts_ms = None
         self._lmb_down_times = deque()  # LMB downs only
@@ -80,6 +81,7 @@ class LoggerCore:
     # Handle any mouse button press/release; track LMB downs for CPS
         evt = f"{button.name}{'Down' if pressed else 'Up'}"
         now_ms = self._ts_ms()
+        ms_since_start = 0 if self.start_ms is None else (now_ms - self.start_ms)  # Ya missed this!
 
         if button.name == "left" and pressed:
             self._record_lmb_down(now_ms)
@@ -94,12 +96,13 @@ class LoggerCore:
         else:
             dx = dy = 0
 
-        self._write_row(self._ts_iso(), x, y, dx, dy, evt, ms_since_button_event, scroll_near_click, combat_state)
+        self._write_row(self._ts_iso(), ms_since_start, x, y, dx, dy, evt, ms_since_button_event, scroll_near_click, combat_state)
 
     def _on_scroll(self, x, y, dx, dy):
     # Handle wheel scroll; mark as near-click when close in time to a button event
         evt = "WheelUp" if dy > 0 else "WheelDown" if dy < 0 else "Wheel"
         now_ms = self._ts_ms()
+        ms_since_start = 0 if self.start_ms is None else (now_ms - self.start_ms)
         ms_since_button_event = 0 if self._last_btn_ts_ms is None else now_ms - self._last_btn_ts_ms
         scroll_near_click = 1 if (self._last_btn_ts_ms is not None and 0 <= ms_since_button_event <= self._near_click_ms) else 0
         combat_state = self._combat_state(now_ms)
@@ -107,7 +110,7 @@ class LoggerCore:
         if not self._coords_enabled:
             x = y = dx = dy = ""
 
-        self._write_row(self._ts_iso(), x, y, dx, dy, evt, ms_since_button_event, scroll_near_click, combat_state)
+        self._write_row(self._ts_iso(), ms_since_start, x, y, dx, dy, evt, ms_since_button_event, scroll_near_click, combat_state)
 
     def _record_lmb_down(self, now_ms):
     # Keep only recent LMB-down timestamps inside the rolling window
@@ -124,14 +127,14 @@ class LoggerCore:
         cps = len(self._lmb_down_times) / (COMBAT_WINDOW_MS / 1000.0)
         return "combat" if cps >= self._combat_cps else "idle"
 
-    def _write_row(self, ts_iso, x, y, dx, dy, event, ms_since_button_event, scroll_near_click, combat_state):
-    # Append a CSV row and forward a tuple to the UI queue
+    def _write_row(self, ts_iso, ms_since_start, x, y, dx, dy, event, ms_since_button_event, scroll_near_click, combat_state):
+        # Append a CSV row and forward a tuple to the UI queue
         if not self._csv:
             return
         # This needs to match the HEADER constant or users get confused and sad.
-        self._csv.writerow([ts_iso, x, y, dx, dy, ms_since_button_event, combat_state, scroll_near_click, event])
+        self._csv.writerow([ts_iso, ms_since_start, x, y, dx, dy, ms_since_button_event, combat_state, scroll_near_click, event])
         try:
-            self.event_queue.put_nowait((ts_iso, x, y, dx, dy, event, ms_since_button_event, scroll_near_click, combat_state))
+            self.event_queue.put_nowait((ts_iso, ms_since_start, x, y, dx, dy, event, ms_since_button_event, scroll_near_click, combat_state))
         except queue.Full:
             pass
         t = time.time()
@@ -153,6 +156,9 @@ class LoggerCore:
         if new_file:
             self._csv.writerow(HEADER)
             self._f.flush()
+            
+        self.start_ms = self._ts_ms()    
+        
         self.listener = mouse.Listener(on_click=self._on_click, on_scroll=self._on_scroll)
         self.listener.start()
 
@@ -199,6 +205,7 @@ class App(tk.Tk):
         self.cps_display = tk.StringVar(value="CPS: 0.0")
         self.file_var = tk.StringVar(value=default_path)
         self.status_var = tk.StringVar(value="Idle")
+        self.time_since_logging_started = tk.StringVar(value="0")
         self.count_var = tk.StringVar(value="0")
 
         self._build_ui()
@@ -265,6 +272,8 @@ class App(tk.Tk):
         ttk.Label(frm, textvariable=self.status_var).grid(row=2, column=1, sticky="w")
         ttk.Label(frm, text="Events:").grid(row=2, column=2, sticky="e")
         ttk.Label(frm, textvariable=self.count_var).grid(row=2, column=3, sticky="w")
+        ttk.Label(frm, text="Running for:").grid(row=1, column=3, sticky="e")
+        ttk.Label(frm, textvariable=self.time_since_logging_started).grid(row=1, column=4, sticky="w")
 
         # row 3: near-click
         ttk.Label(frm, text="Near-click window (ms):").grid(row=3, column=0, sticky="w", pady=(8, 2))
@@ -391,12 +400,12 @@ class App(tk.Tk):
         self.after(100, self.poll_queue)
 
     def on_poll_queue(self, event=None):
-    # Consume queued rows, update counters, and append formatted lines to the Text box
+    # Consume queued rows, update counters, and append ts_formatted lines to the Text box
         updated = False
         cps = 0.0
         while True:
             try:
-                ts, x, y, dx, dy, evt, ms_since_button_event, scroll_near_click, combat_state = self.event_queue.get_nowait()
+                ts, ms_since_start, x, y, dx, dy, evt, ms_since_button_event, scroll_near_click, combat_state = self.event_queue.get_nowait()
             except queue.Empty:
                 break
             self.event_count += 1
@@ -405,19 +414,34 @@ class App(tk.Tk):
             if self.logger:
                 cps = len(self.logger._lmb_down_times) / (COMBAT_WINDOW_MS / 1000.0)
 
-            marker = ""
+            combat_status_maker = ""
             tags = []
             if scroll_near_click == 1 and ("WheelUp" in evt or "WheelDown" in evt):
-                marker += "[NEAR]"
+                combat_status_maker += "[SCROLL NEAR LMB]"
                 tags.append("near")
             if combat_state == "combat":
-                marker += "[COMBAT]"
+                combat_status_maker += "[COMBAT]"
                 tags.append("combat")
             if not tags:
                 tags = ["normal"]
 
-            coord_part = f"x={x} y={y} dx={dx} dy={dy} " if self.coords_enabled.get() else ""
-            line = f"{ts} {coord_part} ms_since_button_event={ms_since_button_event} event={evt} {marker}\n"
+            seconds_since_start = ms_since_start // 1000
+            minutes_since_start = seconds_since_start // 60
+            hours_since_start = minutes_since_start // 60
+
+            td = timedelta(milliseconds=ms_since_start)
+            total_seconds = int(td.total_seconds())
+            formatted_time_since_start = f"{total_seconds // 3600:02}:{(total_seconds % 3600) // 60:02}:{total_seconds % 60:02}.{int(td.microseconds/1000):03}"
+            
+            coord_part = f"x={x} y={y} dx={dx} dy={dy}" if self.coords_enabled.get() else ""
+            ts_formatted = datetime.fromisoformat(ts).strftime("%H:%M:%S") 
+            
+            # If event is a SCROLL wheel event, add additional info    
+            if "Wheel" in evt:
+                line = f"[{ts_formatted}] Running for: {formatted_time_since_start}(HH:MM:SS) {coord_part} ms_since_button_event={ms_since_button_event} scroll_near_click={scroll_near_click} event={evt} {combat_status_maker}\n"
+            else:
+                line = f"[{ts_formatted}] Running for: {formatted_time_since_start}(HH:MM:SS) {coord_part} event={evt} {combat_status_maker}\n"
+
             self.log_box.config(state="normal")
             self.log_box.insert("end", line, tuple(tags))
             self.log_box.see("end")
